@@ -131,7 +131,6 @@ pub fn parse_socket(socket: &str) -> Result<std::net::SocketAddrV4, IPValidation
     let (ip, port) = match socket.len() {
         0 => unreachable!(),
         1 => {
-            dbg!("AA");
             message = message.write(IPValidationMessage::Warning(IPValidationWarning::MissingPort, None));       
             (socket[0], crate::DEFAULT_PORT)
         },

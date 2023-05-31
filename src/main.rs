@@ -1,5 +1,6 @@
-use std::path::{PathBuf, Path};
+use std::{path::PathBuf, mem};
 
+use client::NoFTPClient;
 use iced::{Application, Theme, executor, widget::{container, button, text, column as col, text_input, row, scrollable}, Command, Settings, Alignment, Length, Font, Color, theme::Custom};
 use regex::Regex;
 
@@ -137,11 +138,13 @@ impl Default for AppSettings {
 struct TransferTab {
     selected_ip: Option<usize>,
     hovering_files: bool,
-    transfering_files: Vec<PathBuf>
+    to_transfer_files: Vec<PathBuf>,
+    transfering_files: Vec<(PathBuf, f32)>
 }
 
 struct App {
     server: NoFTPServer,
+    client: NoFTPClient,
     state: GUIState,
     settings_tab: SettingsTab,
     settings: AppSettings,
@@ -200,6 +203,7 @@ impl Application for App {
         (
             App {
                 server,
+                client: NoFTPClient::new(),
                 state: GUIState {
                     tab: GUITab::Menu
                 },
@@ -213,6 +217,7 @@ impl Application for App {
                 transfer: TransferTab {
                     selected_ip: None,
                     hovering_files: false,
+                    to_transfer_files: Vec::new(),
                     transfering_files: Vec::new()
                 }
             },
@@ -240,7 +245,7 @@ impl Application for App {
             AppMessage::ResetUnsetSettings => self.reset_unset_setting(),
             AppMessage::AddFileDialog => {
                 if let Ok(mut files) = native_dialog::FileDialog::new().show_open_multiple_file() {
-                    self.transfer.transfering_files.append(&mut files);
+                    self.transfer.to_transfer_files.append(&mut files);
                 };
             },
             AppMessage::EventOcurred(event) => {
@@ -248,7 +253,7 @@ impl Application for App {
                     match event {
                         FileDragEvent::FileHovered(_) => self.transfer.hovering_files = true,
                         FileDragEvent::FileDropped(path) => {
-                            self.transfer.transfering_files.push(path);
+                            self.transfer.to_transfer_files.push(path);
                             self.transfer.hovering_files = false
                         },
                         FileDragEvent::FilesHoveredLeft => self.transfer.hovering_files = false,
@@ -256,7 +261,7 @@ impl Application for App {
                 }
             },
             AppMessage::SelectIp(ip) => self.transfer.selected_ip = Some(ip),
-            AppMessage::DeleteFile(file_index) => {self.transfer.transfering_files.remove(file_index);},
+            AppMessage::DeleteFile(file_index) => {self.transfer.to_transfer_files.remove(file_index);},
             AppMessage::SendFiles => self.send_files(),
             AppMessage::ClearFriendIpMessage => self.settings_tab.message = None,
             AppMessage::ExploreDownloadDirectory => {
@@ -320,7 +325,7 @@ impl App {
         
         let ips_column = col(ips_column).padding(10).spacing(3).align_items(Alignment::End);
 
-        let (files_column, files_close_column) = self.transfer.transfering_files.iter()
+        let (files_column, files_close_column) = self.transfer.to_transfer_files.iter()
             .enumerate()
             .map(|(i, file_path)| {
                 let file_path = file_path.to_str().unwrap_or("File with invalid characters");
@@ -376,10 +381,13 @@ impl App {
     }
 
     fn view_settings(&self) -> Element<'_> {
-        let apply_button = if self.changed_settings() {
-            button(text("Apply")).on_press(AppMessage::ApplySettings)
+        let apply_button: Element<'_> = if self.changed_settings() {
+            col![
+                text("Unsaved changes").style(Color::new(0.8, 0.0, 0.0, 1.0)),
+                button(text("Apply")).on_press(AppMessage::ApplySettings)
+            ].align_items(Alignment::Center).into()
         } else {
-            button(text("Apply"))
+            button(text("Apply")).into()
         };
 
         let column = col![
@@ -617,11 +625,17 @@ impl App {
         }
     }
 
-    fn send_files(&self) {
-        for file_path in self.transfer.transfering_files.iter() {
+    fn send_files(&mut self) {
+        let to_transfer_files = mem::replace(&mut self.transfer.to_transfer_files, Vec::new());
+        for file_path in to_transfer_files.into_iter() {
             if let Some(ip) = self.transfer.selected_ip {
-                let ip = parse_socket(&self.settings.ips[ip]).unwrap();
-                client::send_path(file_path, ip)
+                let ip = match parse_socket(&self.settings.ips[ip]) {
+                    Ok(ip) => ip,
+                    Err(IPValidationMessage::Warning(_, ip)) => ip.expect("Error recovering from incomplete IP"),
+                    _ => panic!("Invalid IP selected")
+                };
+                self.client.send_path(&file_path, ip);
+                self.transfer.transfering_files.push((file_path, 0.0))
             }
         }
     }
