@@ -19,11 +19,13 @@ pub struct HeaderRaw {
     subheader_type: u8
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 #[repr(u8)]
 pub enum SubHeaderType {
     CreateFile = 0,
-    CreateDirectory = 1
+    CreateDirectory = 1,
+    CreateFileChunked = 2,
+    FillFileChunked = 3,
 }
 
 pub struct Header {
@@ -114,6 +116,60 @@ pub struct SubHeader {
 impl SubHeader {
     #[inline]
     pub fn to_raw(self) -> SubHeaderRaw {
+        self.into()
+    }
+}
+
+pub struct SubHeaderChunkedRaw {
+    packet_size: u64,
+    path_length: u64,
+    path: Vec<u8>
+}
+
+impl SubHeaderChunkedRaw {
+    pub fn new(buffer: &[u8]) -> SubHeaderChunkedRaw {
+        const U64_SIZE: usize = 8;
+
+        let mut start_idx = 0;
+        let packet_size = u64::from_be_bytes(buffer[start_idx..start_idx+U64_SIZE].try_into().unwrap());
+        start_idx += U64_SIZE;
+        let path_length = u64::from_be_bytes(buffer[start_idx..start_idx+U64_SIZE].try_into().unwrap());
+        start_idx += U64_SIZE;
+        let path = buffer[start_idx..start_idx+path_length as usize].into();
+
+        SubHeaderChunkedRaw {
+            packet_size,
+            path_length,
+            path
+        }
+    }
+
+    pub fn parse(self) -> Result<SubHeaderChunked, HeaderError> {
+        self.try_into()
+    }
+
+    pub fn to_vec(mut self) -> Vec<u8> {
+        let mut ret = Vec::with_capacity(
+            mem::size_of::<u64>()
+            + mem::size_of::<u64>()
+            + self.path.len()
+        );
+        ret.append(&mut self.packet_size.to_be_bytes().into());
+        ret.append(&mut self.path_length.to_be_bytes().into());
+        ret.append(&mut self.path);
+
+        ret
+    }
+}
+
+pub struct SubHeaderChunked {
+    pub packet_size: u64,
+    pub path: String
+}
+
+impl SubHeaderChunked {
+    #[inline]
+    pub fn to_raw(self) -> SubHeaderChunkedRaw {
         self.into()
     }
 }

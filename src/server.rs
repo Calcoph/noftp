@@ -1,6 +1,6 @@
-use std::{net::{SocketAddr, SocketAddrV4, SocketAddrV6, TcpStream}, io::{Read, Write}, thread::JoinHandle, sync::{atomic::{Ordering, AtomicBool}, Arc}, future, task::{Context, Waker, RawWaker}, path::Path};
+use std::{net::{SocketAddr, SocketAddrV4, SocketAddrV6, TcpStream}, io::{Read, Write}, thread::JoinHandle, sync::{atomic::{Ordering, AtomicBool}, Arc}, future, task::{Context, Waker, RawWaker}, path::Path, fs::File};
 
-use crate::header::{HeaderRaw, SubHeader, SubHeaderRaw, Header};
+use crate::header::{HeaderRaw, SubHeader, SubHeaderRaw, Header, SubHeaderChunkedRaw};
 
 const BUFFER_SIZE: usize = 8192;
 
@@ -68,9 +68,17 @@ impl NoFTPServer {
             for connection in listener.incoming() {
                 match connection {
                     Ok(connection) => handle_connection(connection, download_path.clone()),
-                    Err(_) => if exit_thread.load(Ordering::Relaxed) { break },
+                    Err(err) => {
+                        match err.kind() {
+                            std::io::ErrorKind::WouldBlock => (),
+                            a => {dbg!(a);},
+                        }
+                        if exit_thread.load(Ordering::Relaxed) { break }
+                    },
                 }
             };
+
+            dbg!("EXITING SERVER");
         });
 
         self.listener_handle = Some(listener_handle)
@@ -78,6 +86,7 @@ impl NoFTPServer {
 }
 
 fn handle_connection(mut connection: TcpStream, downloads_path: String) {
+    dbg!("handling");
     connection.set_nonblocking(false).unwrap();
 
     let connection_addr = connection.peer_addr().unwrap();
@@ -90,30 +99,54 @@ fn handle_connection(mut connection: TcpStream, downloads_path: String) {
     let mut subheader_buff = vec![0;header.subheader_size as usize];
     connection.read_exact(&mut subheader_buff).unwrap();
 
-    let subheader = SubHeaderRaw::new(&subheader_buff).parse().unwrap();
-
     println!("{connection_addr} packet size: {}", header.content_size);
     match header.subheader_type {
-        crate::header::SubHeaderType::CreateFile => create_file(header, subheader, connection, downloads_path),
+        crate::header::SubHeaderType::CreateFile => {
+            let subheader = SubHeaderRaw::new(&subheader_buff).parse().unwrap();
+            let file = create_file(subheader.path, downloads_path);
+            fill_file(connection, file, header.content_size);
+        },
         crate::header::SubHeaderType::CreateDirectory => todo!(),
-    }
+        crate::header::SubHeaderType::CreateFileChunked => {
+            let subheader = SubHeaderChunkedRaw::new(&subheader_buff).parse().unwrap();
+            let file = create_file(subheader.path, downloads_path);
+            fill_file(connection, file, subheader.packet_size);
+        },
+        crate::header::SubHeaderType::FillFileChunked => {
+            let subheader = SubHeaderChunkedRaw::new(&subheader_buff).parse().unwrap();
+            let file = open_file(subheader.path, downloads_path);
+            fill_file(connection, file, subheader.packet_size);
+        },
+    };
+
+    println!("finished file");
 }
 
-fn create_file(header: Header, subheader: SubHeader, mut connection: TcpStream, downloads_path: String) {
-    let path = Path::new("D:\\DETO\\Diego\\Documentos\\GitHub\\noftp").join(&downloads_path).join(subheader.path);
+fn create_file(path: String, downloads_path: String) -> File {
+    let path = Path::new("D:\\DETO\\Diego\\Documentos\\GitHub\\noftp").join(&downloads_path).join(path);
     dbg!(path.parent().unwrap());
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     dbg!(path.clone());
-    let mut file = std::fs::File::create(path).unwrap();
+    std::fs::File::create(path).unwrap()
+}
 
+fn open_file(path: String, downloads_path: String) -> File {
+    let path = Path::new("D:\\DETO\\Diego\\Documentos\\GitHub\\noftp").join(&downloads_path).join(path);
+    dbg!(path.parent().unwrap());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    dbg!(path.clone());
+    std::fs::File::options().append(true).open(path).unwrap()
+}
+
+fn fill_file(mut connection: TcpStream, mut file: File, size: u64) {
     let message_buffer = &mut [0;BUFFER_SIZE];
     let mut bytes_read = 0;
-    while bytes_read < header.content_size {
+    while bytes_read < size {
         let new_read = connection.read(message_buffer).unwrap();
         if new_read > 0 {
             file.write(&message_buffer[0..new_read]).unwrap();
         }
 
-        bytes_read += new_read as u64
+        bytes_read += new_read as u64;
     }
 }

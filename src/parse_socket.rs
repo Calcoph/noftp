@@ -153,8 +153,6 @@ pub fn parse_socket(socket: &str) -> Result<std::net::SocketAddrV4, IPValidation
         }
     };
 
-    dbg!(message.clone());
-
     let ip: Vec<_> = ip.split(".").collect();
     let ip = match ip.len() {
         0..=3 => {
@@ -202,7 +200,6 @@ pub fn parse_socket(socket: &str) -> Result<std::net::SocketAddrV4, IPValidation
         }
     };
 
-    dbg!(message.clone());
     let socket = std::net::SocketAddrV4::new(ip, port);
     message.add_socket(socket);
     match message {

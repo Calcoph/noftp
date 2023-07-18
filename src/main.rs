@@ -1,22 +1,32 @@
-use std::{path::PathBuf, mem};
+use std::{path::PathBuf, mem, collections::HashMap};
 
 use client::NoFTPClient;
-use iced::{Application, Theme, executor, widget::{container, button, text, column as col, text_input, row, scrollable}, Command, Settings, Alignment, Length, Font, Color, theme::Custom};
+use iced::{Application, Theme, executor, widget::{container, button, text, column as col, text_input, row, scrollable, tooltip, focus_next}, Command, Settings, Alignment, Length, Font, Color, theme::Custom};
 use regex::Regex;
 
 mod client;
 mod server;
 mod header;
 mod parse_socket;
+mod settings_tab;
 
 use server::{NoFTPServer, ServerSettings};
 use parse_socket::{parse_socket, IPValidationWarning, IPValidationError, IPValidationMessage};
+use settings_tab::{SettingsTab, FriendIpTab, EditingIpTab};
 
 
 const DEFAULT_PORT: u16 = 24873;
 const DEFAULT_DOWNLOADS_PATH: &'static str = "downloads";
+const MAX_PACKET_SIZE: usize = (i32::MAX >> 1) as usize;
 
 const SETTINGS_PATH: &'static str = "noftp_settings.toml";
+
+const UNSAVED_COLOR: Color = Color {
+    r: 0.8,
+    g: 0.0,
+    b: 0.0,
+    a: 1.0
+};
 
 #[cfg(test)]
 mod tests;
@@ -34,7 +44,8 @@ enum GUITab {
     Menu,
     Settings,
     Transfer,
-    FriendIPs
+    FriendIPs,
+    EditIp(usize),
 }
 
 struct GUIState {
@@ -46,16 +57,9 @@ enum WarnErr {
     Err(String)
 }
 
-struct SettingsTab {
-    port: String,
-    add_ip: String,
-    message: Option<WarnErr>,
-    download_path: String
-}
-
 struct AppSettings {
     server_settings: ServerSettings,
-    ips: Vec<String>
+    ips: Vec<(String, Option<String>)>
 }
 
 impl AppSettings {
@@ -65,11 +69,19 @@ impl AppSettings {
         settings_toml.insert("ips".to_string(),
             toml::Value::Array(
                 self.ips.iter()
-                    .map(|v| toml::Value::String(v.clone()))
+                    .map(|(v, _)| toml::Value::String(v.clone()))
                     .collect()
             )
         );
         settings_toml.insert("download_path".to_string(), toml::Value::String(self.server_settings.download_path.clone()));
+        settings_toml.insert("ip_aliases".to_string(),
+            toml::Value::Table(self.ips.iter().filter_map(|(s, alias)| {
+                // only include the ip if it has an alias
+                alias.clone().map(|alias| {
+                    (s.to_owned(), toml::Value::String(alias.to_owned()))
+                })
+            }).collect())
+        );
 
         let settings_toml = toml::Value::Table(settings_toml);
         std::fs::write(SETTINGS_PATH, toml::to_string_pretty(&settings_toml).unwrap()).unwrap();
@@ -106,6 +118,24 @@ impl AppSettings {
         } else {
             vec![]
         };
+
+        let ip_aliases = if let Some(toml::Value::Table(ip_aliases)) = settings.remove("ip_aliases"){
+            ip_aliases.into_iter()
+                .filter_map(|(ip, alias)|
+                    if let toml::Value::String(value) = alias {
+                        Some((ip, value))
+                    } else {
+                        None
+                    }
+                ).collect()
+        } else {
+            HashMap::new()
+        };
+
+        let ips = ips.into_iter().map(|ip| {
+            let alias = ip_aliases.get(&ip).map(|s| s.to_owned());
+            (ip, alias)
+        }).collect();
 
         let download_path = if let Some(toml::Value::String(download_path)) = settings.remove("download_path"){
             download_path
@@ -155,6 +185,9 @@ struct App {
 enum SettingChange {
     Port(String),
     Ip(String),
+    IpAlias(String),
+    IpEdit(String),
+    IpAliasEdit(String),
     DownloadPath(String),
 }
 
@@ -166,6 +199,7 @@ enum AppMessage {
     ApplySettings,
     MessageList(Vec<Self>),
     DeleteIp(usize),
+    EditIp(usize),
     AddIp,
     AddFileDialog,
     EventOcurred(iced::event::Event),
@@ -173,7 +207,8 @@ enum AppMessage {
     DeleteFile(usize),
     SendFiles,
     ClearFriendIpMessage,
-    ExploreDownloadDirectory
+    ExploreDownloadDirectory,
+    FocusNext,
 }
 
 enum FileDragEvent {
@@ -209,7 +244,14 @@ impl Application for App {
                 },
                 settings_tab: SettingsTab {
                     port: settings.server_settings.port.to_string(),
-                    add_ip: "".to_string(),
+                    friend_ip: FriendIpTab {
+                        ip: "".to_string(),
+                        ip_alias: "".to_string(),
+                        editing: EditingIpTab {
+                            ip: "".to_string(),
+                            ip_alias: "".to_string(),
+                        }
+                    },
                     message: None,
                     download_path: "downloads".to_string(),
                 },
@@ -230,8 +272,9 @@ impl Application for App {
     }
 
     fn update(&mut self, message: Self::Message) -> iced::Command<Self::Message> {
+        let mut ret_msg = Command::none();
         match message {
-            AppMessage::ChangeTab(tab) => self.state.tab = tab,
+            AppMessage::ChangeTab(tab) => self.change_tab(tab),
             AppMessage::ChangeSetting(setting) => self.change_setting(setting),
             AppMessage::ApplySettings => self.apply_settings(),
             AppMessage::MessageList(messages) => {
@@ -270,9 +313,11 @@ impl Application for App {
                     self.settings_tab.download_path = path.to_str().unwrap_or("path with unkown characters").to_string();
                 }
             },
+            AppMessage::FocusNext => ret_msg = focus_next::<Self::Message>(),
+            AppMessage::EditIp(ip_index) => self.edit_ip(ip_index),
         };
 
-        Command::none()
+        ret_msg
     }
 
     fn view(&self) -> Element<'_> {
@@ -281,6 +326,7 @@ impl Application for App {
             GUITab::Settings => self.view_settings(),
             GUITab::Transfer => self.view_transfer(),
             GUITab::FriendIPs => self.view_friend_ips(),
+            GUITab::EditIp(ip) => self.view_edit_ip(ip),
         }
     }
 
@@ -295,7 +341,6 @@ impl App {
             text("Main Menu"),
             button(text("Settings")).on_press(AppMessage::ChangeTab(GUITab::Settings)),
             button(text("Transfer files")).on_press(AppMessage::ChangeTab(GUITab::Transfer)),
-            button(text("File Dialog")).on_press(AppMessage::AddFileDialog)
         ].padding(20)
             .spacing(20)
             .max_width(500)
@@ -310,51 +355,54 @@ impl App {
     }
 
     fn view_transfer(&self) -> Element<'_> {
-        let ips_column = self.settings.ips.iter()
-            .enumerate()
-            .map(|(i, ip)| {
-                let mut butt = button(text(ip)).on_press(AppMessage::SelectIp(i)).into();
-                if let Some(selected_ip) = self.transfer.selected_ip {
-                    if i == selected_ip {
-                        butt = button(text(ip)).into()
-                    }
-                }
-
-                butt
-            }).collect();
-        
-        let ips_column = col(ips_column).padding(10).spacing(3).align_items(Alignment::End);
-
-        let (files_column, files_close_column) = self.transfer.to_transfer_files.iter()
-            .enumerate()
-            .map(|(i, file_path)| {
-                let file_path = file_path.to_str().unwrap_or("File with invalid characters");
-                (
-                    text(file_path).size(15).into(),
-                    button(text("X").size(5)).on_press(AppMessage::DeleteFile(i)).into()
-                )
-            }).unzip();
-
-        let files_column = row![
-            col(files_column).spacing(5),
-            col(files_close_column).spacing(5)
-        ];
-
-        let content = if self.transfer.hovering_files {
-            col![
-                text("DROP FILES HERE").size(80)
-            ].padding(20)
-                .spacing(20)
-                .max_width(500)
-                .align_items(Alignment::Center)
+        if self.transfer.hovering_files {
+            container(text("DROP FILES HERE").size(80))
+                .style(iced::theme::Container::Box)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x()
+                .center_y()
+                .into()
         } else {
+            let ips_column = self.settings.ips.iter()
+                .enumerate()
+                .map(|(i, (ip, alias))| {
+                    let ip_elem = self.get_ip_text(ip, alias);
+                    let mut butt = button(ip_elem).on_press(AppMessage::SelectIp(i)).into();
+                    if let Some(selected_ip) = self.transfer.selected_ip {
+                        if i == selected_ip {
+                            let ip_elem = self.get_ip_text(ip, alias);
+                            butt = button(ip_elem).into()
+                        }
+                    }
+
+                    butt
+                }).collect();
+        
+            let ips_column = col(ips_column).padding(10).spacing(3).align_items(Alignment::End);
+
+            let (files_column, files_close_column) = self.transfer.to_transfer_files.iter()
+                .enumerate()
+                .map(|(i, file_path)| {
+                    let file_path = file_path.to_str().unwrap_or("File with invalid characters");
+                    (
+                        text(file_path).size(15).into(),
+                        button(text("X").size(5)).on_press(AppMessage::DeleteFile(i)).into()
+                    )
+                }).unzip();
+
+            let files_column = row![
+                col(files_column).spacing(5),
+                col(files_close_column).spacing(5)
+            ];
+
             let send_files_button = if self.transfer.selected_ip.is_some() {
                 button(text("Send files")).on_press(AppMessage::SendFiles)
             } else {
                 button(text("Send files"))
             };
 
-            col![
+            let content = col![
                 text("Transfer"),
                 button(text("Main Menu")).on_press(AppMessage::ChangeTab(GUITab::Menu)),
                 row![
@@ -369,21 +417,21 @@ impl App {
             ].padding(20)
                 .spacing(20)
                 .max_width(500)
-                .align_items(Alignment::Center)
-        };
+                .align_items(Alignment::Center);
 
-        container(content)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x()
-            .center_y()
-            .into()
+            container(content)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x()
+                .center_y()
+                .into()
+        }
     }
 
     fn view_settings(&self) -> Element<'_> {
         let apply_button: Element<'_> = if self.changed_settings() {
             col![
-                text("Unsaved changes").style(Color::new(0.8, 0.0, 0.0, 1.0)),
+                text("Unsaved changes").style(UNSAVED_COLOR),
                 button(text("Apply")).on_press(AppMessage::ApplySettings)
             ].align_items(Alignment::Center).into()
         } else {
@@ -430,12 +478,16 @@ impl App {
     }
 
     fn view_friend_ips(&self) -> Element<'_> {
+        let tab = &self.settings_tab.friend_ip;
         let column_elements = self.settings.ips.iter()
             .enumerate()
-            .map(|(i, ip)| {
+            .map(|(i, (ip, ip_alias))| {
+                let ip_text: Element = self.get_ip_text(ip, ip_alias);
+
                 row![
-                    text(ip),
-                    button(text("X")).on_press(AppMessage::DeleteIp(i))
+                    ip_text,
+                    button(text("X")).on_press(AppMessage::DeleteIp(i)),
+                    button(text("edit")).on_press(AppMessage::ChangeTab(GUITab::EditIp(i)))
                 ].spacing(3).into()
             }).collect();
 
@@ -445,13 +497,19 @@ impl App {
                 .padding(20)
                 .spacing(5)
             ).height(Length::Fill)
-                .width(200);
+                .width(Length::Fill);
 
         let mut column = col!(
             ips_column,
             row![
+                text("(Optional) IP Alias:"),
+                text_input("IP alias", &tab.ip_alias)
+                    .on_input(|val| AppMessage::ChangeSetting(SettingChange::IpAlias(val)))
+                    .on_submit(AppMessage::FocusNext),
+            ],
+            row![
                 text("Add IP:"),
-                text_input("IP", &self.settings_tab.add_ip)
+                text_input("IP", &tab.ip)
                     .on_input(|val| AppMessage::ChangeSetting(SettingChange::Ip(val)))
                     .on_submit(AppMessage::AddIp),
                 button(text("Add")).on_press(AppMessage::AddIp)
@@ -474,6 +532,65 @@ impl App {
                 ])
             )
         ).padding(20)
+            .spacing(20)
+            .max_width(500)
+            .align_items(Alignment::Center);
+
+        container(column)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x()
+            .center_y()
+            .into()
+    }
+
+    fn view_edit_ip(&self, ip_index: usize) -> Element {
+        let tab = &self.settings_tab.friend_ip.editing;
+
+        let (ip, alias) = self.settings.ips.get(ip_index).unwrap();
+        let ip_elem = self.get_ip_text(ip, alias);
+        let alias = match alias {
+            Some(alias) => alias,
+            None => "",
+        };
+
+        let return_button = button("Return").on_press(
+            AppMessage::ChangeTab(GUITab::FriendIPs)
+        );
+        let buttons: Element = if self.changed_editing_ip(ip_index) {
+            col![
+                text("Unsaved changes").style(UNSAVED_COLOR),
+                row![
+                    return_button,
+                    button(text("Apply")).on_press(AppMessage::EditIp(ip_index))
+                ]
+            ].into()
+        } else {
+            row![
+                return_button,
+                button(text("Apply"))
+            ].into()
+        };
+
+        let column = col![
+            row![
+                text("Editing: "),
+                ip_elem
+            ],
+            row![
+                text("(Optional) IP Alias:"),
+                text_input(alias, &tab.ip_alias)
+                    .on_input(|val| AppMessage::ChangeSetting(SettingChange::IpAliasEdit(val)))
+                    .on_submit(AppMessage::EditIp(ip_index)),
+            ],
+            row![
+                text("IP:"),
+                text_input(ip, &tab.ip)
+                    .on_input(|val| AppMessage::ChangeSetting(SettingChange::IpEdit(val)))
+                    .on_submit(AppMessage::EditIp(ip_index)),
+            ],
+            buttons
+        ].padding(20)
             .spacing(20)
             .max_width(500)
             .align_items(Alignment::Center);
@@ -550,6 +667,19 @@ impl App {
         false
     }
 
+    fn changed_editing_ip(&self, ip_index: usize) -> bool {
+        let editing = &self.settings_tab.friend_ip.editing;
+        let (ip, alias) = &self.settings.ips[ip_index];
+
+        let changed_ip = &editing.ip != ip;
+        let changed_alias = match alias {
+            Some(alias) => alias != &editing.ip_alias,
+            None => editing.ip_alias != "",
+        };
+
+        changed_ip || changed_alias
+    }
+
     fn delete_ip(&mut self, ip_index: usize) {
         self.settings.ips.remove(ip_index);
 
@@ -557,7 +687,7 @@ impl App {
     }
 
     fn add_ip(&mut self) {
-        match parse_socket(&self.settings_tab.add_ip) {
+        match parse_socket(&self.settings_tab.friend_ip.ip) {
             Err(IPValidationMessage::Error(err)) => {
                 let mut err = err.to_string();
                 err.pop(); // remove final \n
@@ -578,8 +708,15 @@ impl App {
     }
 
     fn add_ip_unchecked(&mut self) {
-        self.settings.ips.push(self.settings_tab.add_ip.clone());
-        self.settings_tab.add_ip = "".to_string();
+        let ip = self.settings_tab.friend_ip.ip.clone();
+        let alias = match self.settings_tab.friend_ip.ip_alias.as_str() {
+            "" => None,
+            a => Some(a.to_owned())
+        };
+
+        self.settings.ips.push((ip, alias));
+        self.settings_tab.friend_ip.ip = "".to_string();
+        self.settings_tab.friend_ip.ip_alias = "".to_string();
 
         self.save_settings()
     }
@@ -597,10 +734,19 @@ impl App {
                 // TODO: Make this better, so only valid IPs are possible to be written, and also auto-insert the dots (.)
                 // TODO: Make this accept IPv6
                 if Regex::new(r"^[0-9\.:]*$").unwrap().is_match(&ip) {
-                    self.settings_tab.add_ip = ip
+                    self.settings_tab.friend_ip.ip = ip
                 };
             },
             SettingChange::DownloadPath(path) => self.settings_tab.download_path = path,
+            SettingChange::IpAlias(alias) => self.settings_tab.friend_ip.ip_alias = alias,
+            SettingChange::IpEdit(ip) => {
+                // TODO: Make this better, so only valid IPs are possible to be written, and also auto-insert the dots (.)
+                // TODO: Make this accept IPv6
+                if Regex::new(r"^[0-9\.:]*$").unwrap().is_match(&ip) {
+                    self.settings_tab.friend_ip.editing.ip = ip
+                };
+            },
+            SettingChange::IpAliasEdit(alias) => self.settings_tab.friend_ip.editing.ip_alias = alias,
         }
     }
 
@@ -609,7 +755,7 @@ impl App {
     }
 
     fn reset_unset_setting(&mut self) {
-        self.settings_tab.add_ip = "".to_string();
+        self.settings_tab.friend_ip.ip = "".to_string();
         self.settings_tab.port = self.settings.server_settings.port.to_string();
     }
 
@@ -629,7 +775,7 @@ impl App {
         let to_transfer_files = mem::replace(&mut self.transfer.to_transfer_files, Vec::new());
         for file_path in to_transfer_files.into_iter() {
             if let Some(ip) = self.transfer.selected_ip {
-                let ip = match parse_socket(&self.settings.ips[ip]) {
+                let ip = match parse_socket(&self.settings.ips[ip].0) {
                     Ok(ip) => ip,
                     Err(IPValidationMessage::Warning(_, ip)) => ip.expect("Error recovering from incomplete IP"),
                     _ => panic!("Invalid IP selected")
@@ -638,5 +784,47 @@ impl App {
                 self.transfer.transfering_files.push((file_path, 0.0))
             }
         }
+    }
+
+    fn get_ip_text(&self, ip: &str, alias: &Option<String>) -> Element {
+        match alias {
+            Some(alias) => tooltip(text(alias), ip, tooltip::Position::Top)
+                .style(iced::theme::Container::Box)
+                .into(),
+            None => text(ip).into(),
+        }
+    }
+
+    fn change_tab(&mut self, tab: GUITab) {
+        match tab {
+            GUITab::EditIp(ip_index) => {
+                let (ip, alias) = self.settings.ips.get(ip_index).unwrap();
+
+                let tab = &mut self.settings_tab.friend_ip.editing;
+                tab.ip = ip.to_owned();
+                tab.ip_alias = match alias {
+                    Some(alias) => alias.to_owned(),
+                    None => "".to_owned(),
+                };
+            },
+            _ => ()
+        }
+
+        self.state.tab = tab;
+    }
+
+    fn edit_ip(&mut self, ip_index: usize) {
+        let edit_tab = &self.settings_tab.friend_ip.editing;
+
+        let new_ip = edit_tab.ip.to_owned();
+        let new_alias = if edit_tab.ip_alias.is_empty() {
+            None
+        } else {
+            Some(edit_tab.ip_alias.to_owned())
+        };
+
+        self.settings.ips[ip_index] = (new_ip, new_alias);
+
+        self.save_settings()
     }
 }

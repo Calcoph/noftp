@@ -2,7 +2,7 @@ use std::str::{from_utf8, Utf8Error};
 
 use crate::header::{HeaderError, HeaderRaw, Header};
 
-use super::{SubHeaderRaw, SubHeader, SubHeaderType};
+use super::{SubHeaderRaw, SubHeader, SubHeaderType, SubHeaderChunked, SubHeaderChunkedRaw};
 
 impl From<Utf8Error> for HeaderError {
     fn from(_: Utf8Error) -> Self {
@@ -17,6 +17,8 @@ impl TryFrom<u8> for SubHeaderType {
         match value {
             0 => Ok(SubHeaderType::CreateFile),
             1 => Ok(SubHeaderType::CreateDirectory),
+            2 => Ok(SubHeaderType::CreateFileChunked),
+            3 => Ok(SubHeaderType::FillFileChunked),
             _ => Err(HeaderError::InvalidSubHeaderType)
         }
     }
@@ -80,5 +82,30 @@ impl Into<SubHeaderRaw> for SubHeader {
             path_length: path.len() as u64,
             path,
         }
+    }
+}
+
+impl Into<SubHeaderChunkedRaw> for SubHeaderChunked {
+    fn into(self) -> SubHeaderChunkedRaw {
+        let path: Vec<u8> = self.path.into();
+        SubHeaderChunkedRaw {
+            packet_size: self.packet_size,
+            path_length: path.len() as u64,
+            path,
+        }
+    }
+}
+
+impl TryInto<SubHeaderChunked> for SubHeaderChunkedRaw {
+    type Error = HeaderError;
+
+    fn try_into(self) -> Result<SubHeaderChunked, Self::Error> {
+        let packet_size = self.packet_size;
+        let path = from_utf8(&self.path)?.to_string();
+
+        Ok(SubHeaderChunked {
+            packet_size,
+            path,
+        })
     }
 }
