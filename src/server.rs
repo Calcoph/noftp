@@ -61,7 +61,7 @@ impl NoFTPServer {
 
         let listener = std::net::TcpListener::bind(addr.clone()).unwrap();
         listener.set_nonblocking(true).unwrap();
-    
+
         let exit_thread = self.exit.clone();
         let download_path = self.settings.download_path.clone();
         let listener_handle = std::thread::spawn(move || {
@@ -86,11 +86,10 @@ impl NoFTPServer {
 }
 
 fn handle_connection(mut connection: TcpStream, downloads_path: String) {
-    dbg!("handling");
     connection.set_nonblocking(false).unwrap();
 
     let connection_addr = connection.peer_addr().unwrap();
-    println!("Connection incomming from {}", connection_addr);
+    //println!("Connection incomming from {}", connection_addr);
 
     let mut header_buff = HeaderRaw::get_buf();
     connection.read_exact(&mut header_buff).unwrap();
@@ -99,7 +98,7 @@ fn handle_connection(mut connection: TcpStream, downloads_path: String) {
     let mut subheader_buff = vec![0;header.subheader_size as usize];
     connection.read_exact(&mut subheader_buff).unwrap();
 
-    println!("{connection_addr} packet size: {}", header.content_size);
+    //println!("{connection_addr} packet size: {}", header.content_size);
     match header.subheader_type {
         crate::header::SubHeaderType::CreateFile => {
             let subheader = SubHeaderRaw::new(&subheader_buff).parse().unwrap();
@@ -124,17 +123,13 @@ fn handle_connection(mut connection: TcpStream, downloads_path: String) {
 
 fn create_file(path: String, downloads_path: String) -> File {
     let path = Path::new("D:\\DETO\\Diego\\Documentos\\GitHub\\noftp").join(&downloads_path).join(path);
-    dbg!(path.parent().unwrap());
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    dbg!(path.clone());
     std::fs::File::create(path).unwrap()
 }
 
 fn open_file(path: String, downloads_path: String) -> File {
     let path = Path::new("D:\\DETO\\Diego\\Documentos\\GitHub\\noftp").join(&downloads_path).join(path);
-    dbg!(path.parent().unwrap());
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    dbg!(path.clone());
     std::fs::File::options().append(true).open(path).unwrap()
 }
 
