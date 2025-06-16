@@ -1,7 +1,7 @@
 use std::{path::PathBuf, mem, collections::HashMap};
 
 use client::NoFTPClient;
-use iced::{Application, Theme, executor, widget::{container, button, text, column as col, text_input, row, scrollable, tooltip, focus_next}, Command, Settings, Alignment, Length, Font, Color, theme::Custom};
+use iced::{executor, widget::{button, column as col, container, focus_next, row, scrollable, text, text_input, tooltip}, Alignment, Application, Color, Length, Settings, Subscription, Task, Theme};
 use regex::Regex;
 
 mod client;
@@ -11,7 +11,7 @@ mod parse_socket;
 mod settings_tab;
 
 use server::{NoFTPServer, ServerSettings};
-use parse_socket::{parse_socket, IPValidationWarning, IPValidationError, IPValidationMessage};
+use parse_socket::{parse_socket, IPValidationMessage};
 use settings_tab::{SettingsTab, FriendIpTab, EditingIpTab};
 
 
@@ -33,10 +33,10 @@ mod tests;
 
 fn main() {
     //std::fs::File::create("downloads/a.txt").unwrap();
-    App::run(Settings {
-        antialiasing: true,
-        ..Settings::default()
-    }).unwrap();
+    iced::application("NoFTP", update, view)
+        .antialiasing(true)
+        .subscription(subscription)
+        .run_with(initialize).unwrap()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -217,122 +217,105 @@ enum FileDragEvent {
     FilesHoveredLeft
 }
 
-type Element<'a> = iced::Element<'a, AppMessage, iced::Renderer<Theme>>;
+type Element<'a> = iced::Element<'a, AppMessage>;
 
-#[derive(Default)]
-struct AppFlags;
+fn initialize() -> (App, iced::Task<AppMessage>) {
+    let settings = AppSettings::load();
+    let server = NoFTPServer::new(settings.server_settings.clone());
 
-impl Application for App {
-    type Executor = executor::Default;
-
-    type Message = AppMessage;
-
-    type Theme = Theme;
-
-    type Flags = AppFlags;
-
-    fn new(_: Self::Flags) -> (Self, iced::Command<Self::Message>) {
-        let settings = AppSettings::load();
-        let server = NoFTPServer::new(settings.server_settings.clone());
-
-        (
-            App {
-                server,
-                client: NoFTPClient::new(),
-                state: GUIState {
-                    tab: GUITab::Menu
-                },
-                settings_tab: SettingsTab {
-                    port: settings.server_settings.port.to_string(),
-                    friend_ip: FriendIpTab {
+    (
+        App {
+            server,
+            client: NoFTPClient::new(),
+            state: GUIState {
+                tab: GUITab::Menu
+            },
+            settings_tab: SettingsTab {
+                port: settings.server_settings.port.to_string(),
+                friend_ip: FriendIpTab {
+                    ip: "".to_string(),
+                    ip_alias: "".to_string(),
+                    editing: EditingIpTab {
                         ip: "".to_string(),
                         ip_alias: "".to_string(),
-                        editing: EditingIpTab {
-                            ip: "".to_string(),
-                            ip_alias: "".to_string(),
-                        }
-                    },
-                    message: None,
-                    download_path: "downloads".to_string(),
-                },
-                settings,
-                transfer: TransferTab {
-                    selected_ip: None,
-                    hovering_files: false,
-                    to_transfer_files: Vec::new(),
-                    transfering_files: Vec::new()
-                }
-            },
-            Command::none()
-        )
-    }
-
-    fn title(&self) -> String {
-        "NoFTP".to_string()
-    }
-
-    fn update(&mut self, message: Self::Message) -> iced::Command<Self::Message> {
-        let mut ret_msg = Command::none();
-        match message {
-            AppMessage::ChangeTab(tab) => self.change_tab(tab),
-            AppMessage::ChangeSetting(setting) => self.change_setting(setting),
-            AppMessage::ApplySettings => self.apply_settings(),
-            AppMessage::MessageList(messages) => {
-                #[allow(unused_must_use)]
-                for message in messages {
-                    self.update(message);
-                }
-            },
-            AppMessage::DeleteIp(ip_index) => self.delete_ip(ip_index),
-            AppMessage::AddIp => self.add_ip(),
-            AppMessage::ResetUnsetSettings => self.reset_unset_setting(),
-            AppMessage::AddFileDialog => {
-                if let Ok(mut files) = native_dialog::FileDialog::new().show_open_multiple_file() {
-                    self.transfer.to_transfer_files.append(&mut files);
-                };
-            },
-            AppMessage::EventOcurred(event) => {
-                if let Some(event) = self.handle_event(event) {
-                    match event {
-                        FileDragEvent::FileHovered(_) => self.transfer.hovering_files = true,
-                        FileDragEvent::FileDropped(path) => {
-                            self.transfer.to_transfer_files.push(path);
-                            self.transfer.hovering_files = false
-                        },
-                        FileDragEvent::FilesHoveredLeft => self.transfer.hovering_files = false,
                     }
-                }
+                },
+                message: None,
+                download_path: "downloads".to_string(),
             },
-            AppMessage::SelectIp(ip) => self.transfer.selected_ip = Some(ip),
-            AppMessage::DeleteFile(file_index) => {self.transfer.to_transfer_files.remove(file_index);},
-            AppMessage::SendFiles => self.send_files(),
-            AppMessage::ClearFriendIpMessage => self.settings_tab.message = None,
-            AppMessage::ExploreDownloadDirectory => {
-                let path = native_dialog::FileDialog::new().show_open_single_dir();
-                if let Ok(Some(path)) = path {
-                    self.settings_tab.download_path = path.to_str().unwrap_or("path with unkown characters").to_string();
+            settings,
+            transfer: TransferTab {
+                selected_ip: None,
+                hovering_files: false,
+                to_transfer_files: Vec::new(),
+                transfering_files: Vec::new()
+            }
+        },
+        iced::Task::none()
+    )
+}
+
+fn update(app: &mut App, message: AppMessage) -> Task<AppMessage> {
+    let mut ret_msg = Task::none();
+    match message {
+        AppMessage::ChangeTab(tab) => app.change_tab(tab),
+        AppMessage::ChangeSetting(setting) => app.change_setting(setting),
+        AppMessage::ApplySettings => app.apply_settings(),
+        AppMessage::MessageList(messages) => {
+            #[allow(unused_must_use)]
+            for message in messages {
+                update(app, message);
+            }
+        },
+        AppMessage::DeleteIp(ip_index) => app.delete_ip(ip_index),
+        AppMessage::AddIp => app.add_ip(),
+        AppMessage::ResetUnsetSettings => app.reset_unset_setting(),
+        AppMessage::AddFileDialog => {
+            if let Ok(mut files) = native_dialog::FileDialogBuilder::default().open_multiple_file().show() {
+                app.transfer.to_transfer_files.append(&mut files);
+            };
+        },
+        AppMessage::EventOcurred(event) => {
+            if let Some(event) = app.handle_event(event) {
+                match event {
+                    FileDragEvent::FileHovered(_) => app.transfer.hovering_files = true,
+                    FileDragEvent::FileDropped(path) => {
+                        app.transfer.to_transfer_files.push(path);
+                        app.transfer.hovering_files = false
+                    },
+                    FileDragEvent::FilesHoveredLeft => app.transfer.hovering_files = false,
                 }
-            },
-            AppMessage::FocusNext => ret_msg = focus_next::<Self::Message>(),
-            AppMessage::EditIp(ip_index) => self.edit_ip(ip_index),
-        };
+            }
+        },
+        AppMessage::SelectIp(ip) => app.transfer.selected_ip = Some(ip),
+        AppMessage::DeleteFile(file_index) => {app.transfer.to_transfer_files.remove(file_index);},
+        AppMessage::SendFiles => app.send_files(),
+        AppMessage::ClearFriendIpMessage => app.settings_tab.message = None,
+        AppMessage::ExploreDownloadDirectory => {
+            let path = native_dialog::FileDialogBuilder::default().open_single_dir().show();
+            if let Ok(Some(path)) = path {
+                app.settings_tab.download_path = path.to_str().unwrap_or("path with unkown characters").to_string();
+            }
+        },
+        AppMessage::FocusNext => ret_msg = focus_next::<AppMessage>(),
+        AppMessage::EditIp(ip_index) => app.edit_ip(ip_index),
+    };
 
-        ret_msg
-    }
+    ret_msg
+}
 
-    fn view(&self) -> Element<'_> {
-        match self.state.tab {
-            GUITab::Menu => self.view_menu(),
-            GUITab::Settings => self.view_settings(),
-            GUITab::Transfer => self.view_transfer(),
-            GUITab::FriendIPs => self.view_friend_ips(),
-            GUITab::EditIp(ip) => self.view_edit_ip(ip),
-        }
+fn view(app: &App) -> Element<'_> {
+    match app.state.tab {
+        GUITab::Menu => app.view_menu(),
+        GUITab::Settings => app.view_settings(),
+        GUITab::Transfer => app.view_transfer(),
+        GUITab::FriendIPs => app.view_friend_ips(),
+        GUITab::EditIp(ip) => app.view_edit_ip(ip),
     }
+}
 
-    fn subscription(&self) -> iced::Subscription<Self::Message> {
-        iced::subscription::events().map(AppMessage::EventOcurred)
-    }
+fn subscription(_: &App) -> Subscription<AppMessage> {
+    iced::event::listen().map(AppMessage::EventOcurred)
 }
 
 impl App {
@@ -344,31 +327,27 @@ impl App {
         ].padding(20)
             .spacing(20)
             .max_width(500)
-            .align_items(Alignment::Center);
+            .align_x(Alignment::Center);
 
         container(column)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x()
-            .center_y()
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
             .into()
     }
 
     fn view_transfer(&self) -> Element<'_> {
         if self.transfer.hovering_files {
             container(text("DROP FILES HERE").size(80))
-                .style(iced::theme::Container::Box)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center_x()
-                .center_y()
+                .style(iced::widget::container::bordered_box)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
                 .into()
         } else {
-            let ips_column = self.settings.ips.iter()
+            let ips_column: Vec<_> = self.settings.ips.iter()
                 .enumerate()
                 .map(|(i, (ip, alias))| {
                     let ip_elem = self.get_ip_text(ip, alias);
-                    let mut butt = button(ip_elem).on_press(AppMessage::SelectIp(i)).into();
+                    let mut butt: Element = button(ip_elem).on_press(AppMessage::SelectIp(i)).into();
                     if let Some(selected_ip) = self.transfer.selected_ip {
                         if i == selected_ip {
                             let ip_elem = self.get_ip_text(ip, alias);
@@ -378,10 +357,10 @@ impl App {
 
                     butt
                 }).collect();
-        
-            let ips_column = col(ips_column).padding(10).spacing(3).align_items(Alignment::End);
 
-            let (files_column, files_close_column) = self.transfer.to_transfer_files.iter()
+            let ips_column = col(ips_column).padding(10).spacing(3).align_x(Alignment::End);
+
+            let (files_column, files_close_column): (Vec<_>, Vec<_>) = self.transfer.to_transfer_files.iter()
                 .enumerate()
                 .map(|(i, file_path)| {
                     let file_path = file_path.to_str().unwrap_or("File with invalid characters");
@@ -417,13 +396,11 @@ impl App {
             ].padding(20)
                 .spacing(20)
                 .max_width(500)
-                .align_items(Alignment::Center);
+                .align_x(Alignment::Center);
 
             container(content)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center_x()
-                .center_y()
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
                 .into()
         }
     }
@@ -431,9 +408,9 @@ impl App {
     fn view_settings(&self) -> Element<'_> {
         let apply_button: Element<'_> = if self.changed_settings() {
             col![
-                text("Unsaved changes").style(UNSAVED_COLOR),
+                text("Unsaved changes").style(|_| text::Style {color: Some(UNSAVED_COLOR),}),
                 button(text("Apply")).on_press(AppMessage::ApplySettings)
-            ].align_items(Alignment::Center).into()
+            ].align_x(Alignment::Center).into()
         } else {
             button(text("Apply")).into()
         };
@@ -460,26 +437,24 @@ impl App {
                     ],
                     text(&self.settings.server_settings.download_path),
                 ].spacing(5)
-            ].align_items(Alignment::Start)
+            ].align_x(Alignment::Start)
                 .spacing(20),
             button(text("Friend IPs")).on_press(AppMessage::ChangeTab(GUITab::FriendIPs)),
             apply_button
         ].padding(20)
             .spacing(20)
             .max_width(500)
-            .align_items(Alignment::Center);
+            .align_x(Alignment::Center);
 
         container(column)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x()
-            .center_y()
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
             .into()
     }
 
     fn view_friend_ips(&self) -> Element<'_> {
         let tab = &self.settings_tab.friend_ip;
-        let column_elements = self.settings.ips.iter()
+        let column_elements: Vec<Element> = self.settings.ips.iter()
             .enumerate()
             .map(|(i, (ip, ip_alias))| {
                 let ip_text: Element = self.get_ip_text(ip, ip_alias);
@@ -493,7 +468,7 @@ impl App {
 
         let ips_column = scrollable(
             col(column_elements)
-                .align_items(Alignment::End)
+                .align_x(Alignment::End)
                 .padding(20)
                 .spacing(5)
             ).height(Length::Fill)
@@ -518,8 +493,8 @@ impl App {
 
         if let Some(message) = &self.settings_tab.message {
             let message = match message {
-                WarnErr::Warn(message) => text(message).style(Color::from_rgba8(255, 0, 255, 1.0)),
-                WarnErr::Err(message) => text(message).style(Color::from_rgba8(255, 0, 0, 1.0))
+                WarnErr::Warn(message) => text(message).style(|_| text::Style { color: Some(Color::from_rgba8(255, 0, 255, 1.0)) }),
+                WarnErr::Err(message) => text(message).style(|_| text::Style { color: Some(Color::from_rgba8(255, 0, 0, 1.0)) })
             };
             column = column.push(message);
         }
@@ -534,13 +509,11 @@ impl App {
         ).padding(20)
             .spacing(20)
             .max_width(500)
-            .align_items(Alignment::Center);
+            .align_x(Alignment::Center);
 
         container(column)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x()
-            .center_y()
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
             .into()
     }
 
@@ -559,7 +532,7 @@ impl App {
         );
         let buttons: Element = if self.changed_editing_ip(ip_index) {
             col![
-                text("Unsaved changes").style(UNSAVED_COLOR),
+                text("Unsaved changes").style(|_| text::Style {color: Some(UNSAVED_COLOR),}),
                 row![
                     return_button,
                     button(text("Apply")).on_press(AppMessage::EditIp(ip_index))
@@ -593,13 +566,11 @@ impl App {
         ].padding(20)
             .spacing(20)
             .max_width(500)
-            .align_items(Alignment::Center);
+            .align_x(Alignment::Center);
 
         container(column)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x()
-            .center_y()
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
             .into()
     }
 
@@ -786,10 +757,10 @@ impl App {
         }
     }
 
-    fn get_ip_text(&self, ip: &str, alias: &Option<String>) -> Element {
+    fn get_ip_text<'a>(&self, ip: &'a str, alias: &'a Option<String>) -> Element<'a> {
         match alias {
             Some(alias) => tooltip(text(alias), ip, tooltip::Position::Top)
-                .style(iced::theme::Container::Box)
+                .style(iced::widget::container::bordered_box)
                 .into(),
             None => text(ip).into(),
         }
