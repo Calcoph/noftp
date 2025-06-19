@@ -1,5 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
-    "noftp-gui"
+    "noftp-gui",
+    "noftp-lib"
 ]
+
+[workspace.dependencies]
+noftp_lib = { path = "noftp_lib" }
